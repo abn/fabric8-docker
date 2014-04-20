@@ -1,44 +1,45 @@
 FROM centos
 
 # telnet is required by some fabric command. without it you have silent failures
-RUN yum install -y java-1.7.0-openjdk which telnet unzip openssh-server sudo openssh-clients
-# enable no pass and speed up authentication
-RUN sed -i 's/#PermitEmptyPasswords no/PermitEmptyPasswords yes/;s/#UseDNS yes/UseDNS no/' /etc/ssh/sshd_config
+RUN yum install -y java-1.7.0-openjdk which telnet unzip openssh-server \
+ sudo openssh-clients util-linux
 
 # enabling sudo group
-RUN echo '%wheel ALL=(ALL) ALL' >> /etc/sudoers
-# enabling sudo over ssh
-RUN sed -i 's/.*requiretty$/#Defaults requiretty/' /etc/sudoers
+RUN grep '^%wheel' /etc/sudoers > /dev/null \
+ || echo '%wheel ALL=(ALL) ALL' >> /etc/sudoers
 
 ENV JAVA_HOME /usr/lib/jvm/jre
 
+# default to latest version of io.fabric8:fabric8-karaf:LATEST
+ENV FABRIC8_SRC_DEFAULT https://repository.sonatype.org/service/local/artifact/maven/redirect?r=central-proxy&g=io.fabric8&a=fabric8-karaf&v=LATEST&e=zip
+
+# configuration
 ENV FABRIC8_KARAF_NAME root
 ENV FABRIC8_BINDADDRESS 0.0.0.0
 ENV FABRIC8_PROFILES docker
+ENV FABRIC8_START_SCRIPT /usr/bin/fabric8-start
+ENV FABRIC8_HOME /usr/share/fabric8
 
 # add a user for the application, with sudo permissions
-RUN useradd -m fabric8 ; echo fabric8: | chpasswd ; usermod -a -G wheel fabric8
+RUN rm -rf $FABRIC8_HOME
+RUN useradd -m -d $FABRIC8_HOME fabric8
+RUN usermod -s /sbin/nologin -a -G wheel fabric8
+WORKDIR /usr/share/fabric8
 
 # command line goodies
-RUN echo "export JAVA_HOME=/usr/lib/jvm/jre" >> /etc/profile
+RUN echo "export JAVA_HOME=${JAVA_HOME}" >> /etc/profile
 RUN echo "alias ll='ls -l --color=auto'" >> /etc/profile
 RUN echo "alias grep='grep --color=auto'" >> /etc/profile
 
-
-WORKDIR /home/fabric8
-
-USER fabric8
-
-#RUN curl --silent --output fabric8.zip https://repository.jboss.org/nexus/content/groups/fs-public-snapshots/io/fabric8/fabric8-karaf/1.1.0-SNAPSHOT/fabric8-karaf-1.1.0-20140408.090633-16.zip
-RUN curl --silent --output fabric8.zip http://central.maven.org/maven2/io/fabric8/fabric8-karaf/1.1.0.Beta4/fabric8-karaf-1.1.0.Beta4.zip
+RUN curl --silent --location --output fabric8.zip \
+ ${FABRIC8_SRC:-$FABRIC8_SRC_DEFAULT}
 RUN unzip -q fabric8.zip 
-RUN ls -al
-#RUN mv fabric8-karaf-1.1.0-SNAPSHOT fabric8-karaf
-RUN mv fabric8-karaf-1.1.0.Beta4 fabric8-karaf
 RUN rm fabric8.zip
-#RUN chown -R fabric8:fabric8 fabric8-karaf
+RUN find $(pwd) -maxdepth 1 -type d -name "fabric8-karaf-*" \
+ | head -n 1 \
+ | xargs -I {} mv {} fabric8-karaf
 
-WORKDIR /home/fabric8/fabric8-karaf/etc
+WORKDIR /usr/share/fabric8/fabric8-karaf/etc
 
 # lets remove the karaf.name by default so we can default it from env vars
 RUN sed -i '/karaf.name=root/d' system.properties 
@@ -52,25 +53,28 @@ RUN sed -i '/karaf.delay.console=true/d' config.properties
 RUN echo karaf.delay.console=false >> config.properties
 
 # lets add a user - should ideally come from env vars?
-RUN echo >> users.properties 
-RUN echo admin=admin,admin >> users.properties 
+RUN touch users.properties
+RUN sed -i '/^admin=/d' users.properties
+RUN sed -i '/developerUserPassword/d' users.properties
+RUN TEMP_PASSWORD=${FABRIC8_ADMIN_PASSWORD:-$(strings /dev/urandom \
+ | grep -o '[[:alnum:]]' | head -n 8 | tr -d '\n'; echo)}; \
+ echo admin=${TEMP_PASSWORD},admin >> users.properties
 
 # lets enable logging to standard out
 RUN echo log4j.rootLogger=INFO, stdout, osgi:* >> org.ops4j.pax.logging.cfg 
 
-WORKDIR /home/fabric8/fabric8-karaf
-
 # ensure we have a log file to tail 
-RUN mkdir -p data/log
-RUN echo >> data/log/karaf.log
+RUN mkdir -p $FABRIC8_HOME/data/log
+RUN touch $FABRIC8_HOME/data/log/karaf.log
 
-WORKDIR /home/fabric8
+RUN chown -R fabric8:fabric8 $FABRIC8_HOME
 
-RUN curl --silent --output startup.sh https://raw.githubusercontent.com/fabric8io/fabric8-docker/c9583367e3da4ca7adfc535107b9dc9ce07589d0/startup.sh
-RUN chmod +x startup.sh
+RUN curl --silent --output $FABRIC8_START_SCRIPT \
+ https://raw.githubusercontent.com/fabric8io/fabric8-docker/master/startup.sh
+RUN chmod +x $FABRIC8_START_SCRIPT
 
-EXPOSE 22 1099 2181 8101 8181 9300 9301 44444 61616 
+RUN [ ${ENABLE_SSHD:-0} -eq 1 ] && service sshd start || echo Skipping sshd start
 
-USER root
+EXPOSE 22 1099 2181 8101 8181 9300 9301 44444 61616
 
-CMD /home/fabric8/startup.sh
+USER fabric8
